@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+import time
 import phonenumbers
 from phonenumbers.timezone import time_zones_for_number
 import pytz
@@ -53,6 +54,7 @@ class ConversationManager:
         """
         Main orchestration logic for handling an incoming WhatsApp message.
         """
+        start_time = time.perf_counter()
         user_id = from_number
         media_bytes = None
 
@@ -119,13 +121,34 @@ class ConversationManager:
         user_tz = pytz.timezone(user_tz_str)
         local_time = datetime.now(user_tz)
         
-        if media_id:
-            media_bytes = await whatsapp_sender.download_media(media_id)
-
-        # 1. Ensure user exists and get onboarding state
-        user_record = await db.ensure_user(user_id)
+        # 1. ── UNIFIED FRONT-END FETCHING (CONCURRENT) ───────────────────────
+        fetch_start = time.perf_counter()
         
-        # --- ONBOARDING INTERCEPT ---
+        # Define all concurrent preparation tasks
+        tasks = {
+            "user_record": db.ensure_user(user_id),
+            "rag": engine.query(message_text, user_id),
+            "history": db.get_conversation_history(user_id, limit=5),
+            "reminders": db.get_user_pending_reminders(user_id)
+        }
+        
+        # Optionally add media download if ID is present
+        if media_id:
+            tasks["media"] = whatsapp_sender.download_media(media_id)
+            
+        # Execute everything in one burst
+        results = await asyncio.gather(*tasks.values())
+        task_map = dict(zip(tasks.keys(), results))
+        
+        user_record = task_map["user_record"]
+        rag_results = task_map["rag"]
+        history = task_map.get("history", [])
+        pending_reminders = task_map.get("reminders", [])
+        media_bytes = task_map.get("media")
+        
+        logger.info(f"Front-end data gathering took {time.perf_counter() - fetch_start:.2f}s")
+
+        # 2. ── ONBOARDING INTERCEPT ──────────────────────────────────────────
         if user_record and not user_record.get("is_onboarded"):
             step = user_record.get("onboarding_step", "start")
             
@@ -211,18 +234,12 @@ class ConversationManager:
             await whatsapp_sender.send_message(user_id, action.reply or "✅ Got it! I've remembered that for you.")
             return
 
-        # 2a. Retrieve context from RAG (returns dicts with 'id' and 'document_text')
-        rag_results = await engine.query(message_text, user_id)
-        # Build context string: include IDs so LLM can reference them for conflict resolution
+        # 3. ── BUILD AUGMENTED CONTEXT ───────────────────────────────────────
+        # Build context strings
         rag_context = "\n".join(
             [f"- [mem_id:{m['id']}] {m['document_text']}" for m in rag_results]
         )
         
-        # 2b. Retrieve conversation history
-        history = await db.get_conversation_history(user_id, limit=5)
-        
-        # 2c. Retrieve pending reminders for context
-        pending_reminders = await db.get_user_pending_reminders(user_id)
         reminders_context = ""
         if pending_reminders:
             reminders_context = "Pending Reminders:\n" + "\n".join(
@@ -241,7 +258,9 @@ class ConversationManager:
             full_system_instruction += f"\n\n{reminders_context}"
             
         # 2e. Call Gemini for Structured Processing
+        llm_start = time.perf_counter()
         action = await gemini_client.get_response(full_system_instruction, history, message_text, media_bytes, mime_type)
+        logger.info(f"Gemini LLM call took {time.perf_counter() - llm_start:.2f}s")
 
         # 2e. Send WhatsApp reply IMMEDIATELY — user gets response right away
         final_reply = action.reply
@@ -253,42 +272,47 @@ class ConversationManager:
         elif action.list_reminders and not pending_reminders:
             final_reply += "\n\n(You have no pending reminders at the moment.)"
 
-        if action.interactive_widget:
-            w_type = action.interactive_widget.get("type")
-            if w_type == "button":
-                opts = action.interactive_widget.get("options", [])
-                buttons = [{"id": f"btn_{i}", "title": opt} for i, opt in enumerate(opts[:3])]
-                await whatsapp_sender.send_interactive_buttons(user_id, final_reply, buttons)
-            elif w_type == "list":
-                btn_label = action.interactive_widget.get("button_label", "Select")
-                sects = action.interactive_widget.get("sections", [])
-                await whatsapp_sender.send_interactive_list(user_id, final_reply, btn_label, sects)
+        # 4. ── FULL PIPELINE PARALLELIZATION (BACK-END) ─────────────────────
+        # We fire the WhatsApp reply AND all DB operations concurrently.
+        # The user receives the message faster because we don't wait for DB writes first.
+        
+        async def _send_reply():
+            s_start = time.perf_counter()
+            if action.interactive_widget:
+                w_type = action.interactive_widget.get("type")
+                if w_type == "button":
+                    opts = action.interactive_widget.get("options", [])
+                    buttons = [{"id": f"btn_{i}", "title": opt} for i, opt in enumerate(opts[:3])]
+                    await whatsapp_sender.send_interactive_buttons(user_id, final_reply, buttons)
+                elif w_type == "list":
+                    btn_label = action.interactive_widget.get("button_label", "Select")
+                    sects = action.interactive_widget.get("sections", [])
+                    await whatsapp_sender.send_interactive_list(user_id, final_reply, btn_label, sects)
+                else:
+                    await whatsapp_sender.send_message(user_id, final_reply)
             else:
                 await whatsapp_sender.send_message(user_id, final_reply)
-        else:
-            await whatsapp_sender.send_message(user_id, final_reply)
+            logger.info(f"WhatsApp reply send took {time.perf_counter() - s_start:.2f}s")
 
-        # 2f. Schedule any new reminders
-        if action.reminders:
-            for rm in action.reminders:
+        async def _handle_reminders():
+            if action.reminders:
+                for rm in action.reminders:
+                    try:
+                        r_id = str(uuid.uuid4())
+                        run_datetime = datetime.fromisoformat(rm.time.replace("Z", "+00:00"))
+                        await db.create_reminder(r_id, user_id, rm.text, run_datetime)
+                        scheduler_engine.schedule_reminder(user_id, rm.text, run_datetime, r_id)
+                    except Exception as e:
+                        logger.error(f"Failed to process reminder: {e}")
+            if action.cancel_reminder_id:
                 try:
-                    r_id = str(uuid.uuid4())
-                    run_datetime = datetime.fromisoformat(rm.time.replace("Z", "+00:00"))
-                    
-                    # Persist in DB and schedule in APScheduler
-                    await db.create_reminder(r_id, user_id, rm.text, run_datetime)
-                    scheduler_engine.schedule_reminder(user_id, rm.text, run_datetime, r_id)
+                    await scheduler_engine.cancel_reminder(action.cancel_reminder_id)
                 except Exception as e:
-                    logger.error(f"Failed to process reminder: {e}")
+                    logger.error(f"Failed to cancel reminder: {e}")
 
-        # 2g. Handle cancellation
-        if action.cancel_reminder_id:
-            await scheduler_engine.cancel_reminder(action.cancel_reminder_id)
-
-        # 2g. Fire all DB writes concurrently — don't make the user wait for housekeeping
         async def _save_conversation():
             await db.save_conversation(
-                user_id, message_text or "[Image Uploaded]", action.reply, "gemini-pro-structured"
+                user_id, message_text or "[Multimodal/Interactive]", action.reply, "gemini-flash"
             )
 
         async def _save_memory():
@@ -305,11 +329,18 @@ class ConversationManager:
                     logger.info(f"Deleting stale memory {stale_id} for {user_id}")
                     await db.delete_memory(stale_id)
 
+        # Fire everything together
+        backend_start = time.perf_counter()
         await asyncio.gather(
+            _send_reply(),
+            _handle_reminders(),
             _save_conversation(),
             _save_memory(),
             _delete_stale_memories(),
-            return_exceptions=True  # DB errors don't crash the handler
+            return_exceptions=True
         )
+        logger.info(f"Back-end operations (Parallel) took {time.perf_counter() - backend_start:.2f}s")
+        
+        logger.info(f"Total handle_message execution for {user_id}: {time.perf_counter() - start_time:.2f}s")
 
 manager = ConversationManager()
