@@ -9,13 +9,21 @@ from app.database.supabase_impl import db
 from app.config import settings
 from app.scheduler.engine import scheduler_engine
 
+import sys
+import io
+
+# Force UTF-8 encoding for Windows consoles to handle emojis
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 # Configure logging
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("assistant.log")
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("assistant.log", encoding="utf-8")
     ]
 )
 logger = logging.getLogger(__name__)
@@ -30,6 +38,7 @@ async def startup_event():
     # Initialize database tables
     await db.initialize()
     scheduler_engine.start()
+    await scheduler_engine.load_reminders()
     logger.info("Application started and database initialized.")
 
 @app.get("/")

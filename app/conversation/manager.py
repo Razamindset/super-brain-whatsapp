@@ -22,13 +22,16 @@ logger = logging.getLogger(__name__)
 class ConversationManager:
     def __init__(self):
         self.system_instruction = (
-            "You are a helpful personal assistant on WhatsApp. "
+            "You are a helpful personal assistant on WhatsApp named Super Brain. "
             "You have access to the user's previous conversations and relevant personal notes (memories). "
             "Use the provided context to answer accurately. If you don't know something, just say you don't know. "
             "MEMORY MANAGEMENT: When relevant memories are provided, they include a unique ID in the format [mem_id:UUID]. "
             "If the user says something that CONTRADICTS or UPDATES an existing memory (e.g., they previously said 'use emojis' "
             "but now say 'stop using emojis'), you MUST: (1) save the new memory via memory_to_save, and (2) delete the "
-            "conflicting old memory by putting its UUID in memory_ids_to_delete."
+            "conflicting old memory by putting its UUID in memory_ids_to_delete.\n\n"
+            "REMINDERS: You have access to the user's 'Pending Reminders' in the context. "
+            "If the user asks to see their reminders, set list_reminders to true. "
+            "If they ask to cancel or remove a specific reminder, find its ID from the context and put it in cancel_reminder_id."
         )
 
     def get_user_timezone(self, phone_number_str: str) -> str:
@@ -54,6 +57,8 @@ class ConversationManager:
         # Must run BEFORE anything else so we don't log these as conversations.
         if button_id:
             if button_id.startswith(REMINDER_DONE_PREFIX):
+                r_id = button_id[len(REMINDER_DONE_PREFIX):]
+                await scheduler_engine.cancel_reminder(r_id)  # Marks as cancelled/done in DB
                 await whatsapp_sender.send_message(
                     user_id,
                     "✅ *Great job!* Reminder marked as done. 🎉"
@@ -61,9 +66,22 @@ class ConversationManager:
                 return
 
             elif button_id.startswith(REMINDER_SNOOZE_10_PREFIX):
-                reminder_text = button_id[len(REMINDER_SNOOZE_10_PREFIX):]
+                old_r_id = button_id[len(REMINDER_SNOOZE_10_PREFIX):]
+                # Get the old reminder text from DB if possible, or we could have encoded it (but it might be long)
+                # For now, let's assume we want to keep the text. 
+                # Better: retrieve from DB.
+                reminders = await db.get_user_pending_reminders(user_id)
+                reminder = next((r for r in reminders if r["id"] == old_r_id), None)
+                r_text = reminder["text"] if reminder else "Snoozed task"
+                
+                new_r_id = str(uuid.uuid4())
                 snooze_until = datetime.now(pytz.utc) + timedelta(minutes=10)
-                scheduler_engine.schedule_reminder(user_id, reminder_text, snooze_until)
+                
+                # Persist new and cancel old
+                await db.cancel_reminder(old_r_id)
+                await db.create_reminder(new_r_id, user_id, r_text, snooze_until)
+                scheduler_engine.schedule_reminder(user_id, r_text, snooze_until, new_r_id)
+                
                 user_tz_str = self.get_user_timezone(user_id)
                 local_snooze = snooze_until.astimezone(pytz.timezone(user_tz_str))
                 await whatsapp_sender.send_message(
@@ -73,9 +91,18 @@ class ConversationManager:
                 return
 
             elif button_id.startswith(REMINDER_SNOOZE_60_PREFIX):
-                reminder_text = button_id[len(REMINDER_SNOOZE_60_PREFIX):]
+                old_r_id = button_id[len(REMINDER_SNOOZE_60_PREFIX):]
+                reminders = await db.get_user_pending_reminders(user_id)
+                reminder = next((r for r in reminders if r["id"] == old_r_id), None)
+                r_text = reminder["text"] if reminder else "Snoozed task"
+                
+                new_r_id = str(uuid.uuid4())
                 snooze_until = datetime.now(pytz.utc) + timedelta(hours=1)
-                scheduler_engine.schedule_reminder(user_id, reminder_text, snooze_until)
+                
+                await db.cancel_reminder(old_r_id)
+                await db.create_reminder(new_r_id, user_id, r_text, snooze_until)
+                scheduler_engine.schedule_reminder(user_id, r_text, snooze_until, new_r_id)
+                
                 user_tz_str = self.get_user_timezone(user_id)
                 local_snooze = snooze_until.astimezone(pytz.timezone(user_tz_str))
                 await whatsapp_sender.send_message(
@@ -191,42 +218,69 @@ class ConversationManager:
         # 2b. Retrieve conversation history
         history = await db.get_conversation_history(user_id, limit=5)
         
+        # 2c. Retrieve pending reminders for context
+        pending_reminders = await db.get_user_pending_reminders(user_id)
+        reminders_context = ""
+        if pending_reminders:
+            reminders_context = "Pending Reminders:\n" + "\n".join(
+                [f"- [ID: {r['id']}] {r['text']} at {r['run_at']}" for r in pending_reminders]
+            )
+
         # Extract personalization
         user_name = user_record.get("name", "User") if user_record else "User"
         user_prefs = user_record.get("preferences", {}) if user_record else {}
         
-        # 2c. Build Augmented Prompt
+        # 2d. Build Augmented Prompt
         full_system_instruction = self.system_instruction + f"\n\nCURRENT CONTEXT: The user's name is {user_name}. Their preferences are: {user_prefs}. The user's timezone is roughly {user_tz_str}. The current exact local time and date for the user is {local_time.isoformat()}."
         if rag_context:
             full_system_instruction += f"\n\nRelevant user notes/information:\n{rag_context}"
+        if reminders_context:
+            full_system_instruction += f"\n\n{reminders_context}"
             
-        # 2d. Call Gemini for Structured Processing
+        # 2e. Call Gemini for Structured Processing
         action = await gemini_client.get_response(full_system_instruction, history, message_text, image_bytes)
 
         # 2e. Send WhatsApp reply IMMEDIATELY — user gets response right away
+        final_reply = action.reply
+        
+        # If assistant wants to list reminders, append them to the reply if not already handled
+        if action.list_reminders and pending_reminders:
+            reminder_list = "\n".join([f"• {r['text']} (_at {datetime.fromisoformat(r['run_at']).strftime('%H:%M')}_)" for r in pending_reminders])
+            final_reply += f"\n\n*Your Scheduled Reminders:*\n{reminder_list}"
+        elif action.list_reminders and not pending_reminders:
+            final_reply += "\n\n(You have no pending reminders at the moment.)"
+
         if action.interactive_widget:
             w_type = action.interactive_widget.get("type")
             if w_type == "button":
                 opts = action.interactive_widget.get("options", [])
                 buttons = [{"id": f"btn_{i}", "title": opt} for i, opt in enumerate(opts[:3])]
-                await whatsapp_sender.send_interactive_buttons(user_id, action.reply, buttons)
+                await whatsapp_sender.send_interactive_buttons(user_id, final_reply, buttons)
             elif w_type == "list":
                 btn_label = action.interactive_widget.get("button_label", "Select")
                 sects = action.interactive_widget.get("sections", [])
-                await whatsapp_sender.send_interactive_list(user_id, action.reply, btn_label, sects)
+                await whatsapp_sender.send_interactive_list(user_id, final_reply, btn_label, sects)
             else:
-                await whatsapp_sender.send_message(user_id, action.reply)
+                await whatsapp_sender.send_message(user_id, final_reply)
         else:
-            await whatsapp_sender.send_message(user_id, action.reply)
+            await whatsapp_sender.send_message(user_id, final_reply)
 
-        # 2f. Schedule any reminders (in-process, near-instant — no need to parallelize)
+        # 2f. Schedule any new reminders
         if action.reminders:
             for rm in action.reminders:
                 try:
+                    r_id = str(uuid.uuid4())
                     run_datetime = datetime.fromisoformat(rm.time.replace("Z", "+00:00"))
-                    scheduler_engine.schedule_reminder(user_id, rm.text, run_datetime)
+                    
+                    # Persist in DB and schedule in APScheduler
+                    await db.create_reminder(r_id, user_id, rm.text, run_datetime)
+                    scheduler_engine.schedule_reminder(user_id, rm.text, run_datetime, r_id)
                 except Exception as e:
-                    logger.error(f"Failed to parse reminder time {rm.time}: {e}")
+                    logger.error(f"Failed to process reminder: {e}")
+
+        # 2g. Handle cancellation
+        if action.cancel_reminder_id:
+            await scheduler_engine.cancel_reminder(action.cancel_reminder_id)
 
         # 2g. Fire all DB writes concurrently — don't make the user wait for housekeeping
         async def _save_conversation():

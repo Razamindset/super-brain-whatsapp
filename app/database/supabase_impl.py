@@ -1,6 +1,7 @@
 from supabase import create_client, Client
 from app.config import settings
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -121,5 +122,71 @@ class SupabaseDatabase:
         except Exception as e:
             logger.error(f"Error getting all conversations: {e}")
             return []
+
+    # ── Reminder persistence ──────────────────────────────────────────────────
+
+    async def create_reminder(self, reminder_id: str, user_id: str, text: str, run_at: datetime) -> bool:
+        """Persist a new reminder row (status=pending)."""
+        try:
+            self.supabase.table("reminders").insert({
+                "id": reminder_id,
+                "user_id": user_id,
+                "text": text,
+                "run_at": run_at.isoformat(),
+                "status": "pending"
+            }).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error creating reminder {reminder_id}: {e}")
+            return False
+
+    async def get_user_pending_reminders(self, user_id: str) -> List[Dict[str, Any]]:
+        """Return all pending reminders for a user, ordered by run_at."""
+        try:
+            res = (
+                self.supabase.table("reminders")
+                .select("id, text, run_at")
+                .eq("user_id", user_id)
+                .eq("status", "pending")
+                .order("run_at")
+                .execute()
+            )
+            return res.data or []
+        except Exception as e:
+            logger.error(f"Error fetching pending reminders for {user_id}: {e}")
+            return []
+
+    async def get_all_pending_reminders(self) -> List[Dict[str, Any]]:
+        """Return ALL pending reminders across all users (used on startup to reload APScheduler)."""
+        try:
+            res = (
+                self.supabase.table("reminders")
+                .select("id, user_id, text, run_at")
+                .eq("status", "pending")
+                .order("run_at")
+                .execute()
+            )
+            return res.data or []
+        except Exception as e:
+            logger.error(f"Error fetching all pending reminders: {e}")
+            return []
+
+    async def cancel_reminder(self, reminder_id: str) -> bool:
+        """Mark a reminder as cancelled."""
+        try:
+            self.supabase.table("reminders").update({"status": "cancelled"}).eq("id", reminder_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error cancelling reminder {reminder_id}: {e}")
+            return False
+
+    async def mark_reminder_fired(self, reminder_id: str) -> bool:
+        """Mark a reminder as fired after it triggers."""
+        try:
+            self.supabase.table("reminders").update({"status": "fired"}).eq("id", reminder_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking reminder {reminder_id} as fired: {e}")
+            return False
 
 db = SupabaseDatabase()
