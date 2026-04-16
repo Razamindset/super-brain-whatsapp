@@ -76,12 +76,19 @@ class MetaHandler:
             
             body = ""
             media_id = None
+            mime_type = None
             button_id = None
             if message_type == "text":
                 body = msg.get("text", {}).get("body", "")
             elif message_type == "image":
                 body = msg.get("image", {}).get("caption", "")
                 media_id = msg.get("image", {}).get("id")
+                mime_type = msg.get("image", {}).get("mime_type")
+            elif message_type in ["audio", "voice"]:
+                audio_data = msg.get(message_type, {})
+                media_id = audio_data.get("id")
+                mime_type = audio_data.get("mime_type")
+                body = "[Voice/Audio Message]"
             elif message_type == "interactive":
                 interactive = msg.get("interactive", {})
                 itype = interactive.get("type")
@@ -104,6 +111,7 @@ class MetaHandler:
                 "body": body,
                 "button_id": button_id,
                 "media_id": media_id,
+                "mime_type": mime_type,
                 "message_id": message_id
             }
             

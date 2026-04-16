@@ -23,16 +23,16 @@ class AssistantAction(BaseModel):
 class GeminiClient:
     def __init__(self):
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-3.1-flash-lite-preview",
+            model="gemini-2.5-flash-lite",
             google_api_key=settings.GEMINI_API_KEY,
             temperature=0.7,
             convert_system_message_to_human=True
         )
         self.structured_llm = self.llm.with_structured_output(AssistantAction)
 
-    async def get_response(self, system_instruction: str, history: List[Dict[str, Any]], user_message: str, image_bytes: bytes = None) -> AssistantAction:
+    async def get_response(self, system_instruction: str, history: List[Dict[str, Any]], user_message: str, media_bytes: bytes = None, mime_type: str = None) -> AssistantAction:
         """
-        Generate an AssistantAction response from Gemini using system instructions, conversation history, and the current message/image.
+        Generate an AssistantAction response from Gemini using system instructions, conversation history, and current multimodal input.
         """
         # Formulate messages for LangChain ChatModel
         messages = [
@@ -46,17 +46,26 @@ class GeminiClient:
             
         # Add current message
         content = []
-        if user_message:
+        if user_message and user_message != "[Voice/Audio Message]":
             content.append({"type": "text", "text": user_message})
-        elif image_bytes:
-            content.append({"type": "text", "text": "Can you describe this image for me?"})
+        elif media_bytes and not user_message:
+            content.append({"type": "text", "text": "Can you process this for me?"})
             
-        if image_bytes:
-            base64_image = base64.b64encode(image_bytes).decode("utf-8")
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-            })
+        if media_bytes and mime_type:
+            base64_media = base64.b64encode(media_bytes).decode("utf-8")
+            
+            if mime_type.startswith("image/"):
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{base64_media}"}
+                })
+            elif mime_type.startswith("audio/"):
+                # LangChain/Gemini format for audio
+                content.append({
+                    "type": "media",
+                    "mime_type": mime_type,
+                    "data": base64_media
+                })
             
         messages.append(("human", content))
         

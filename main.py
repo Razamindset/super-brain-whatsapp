@@ -91,18 +91,19 @@ async def whatsapp_webhook(
         message_type = msg_data.get("message_type")
         
         # Fallback for unsupported types
-        if message_type not in ["text", "image", "interactive"]:
-            fallback_msg = f"{message_type.capitalize()}s not supported now. Please send a text or image message."
+        if message_type not in ["text", "image", "interactive", "audio", "voice"]:
+            fallback_msg = f"{message_type.capitalize()}s not supported now. Please send a text, image, or voice message."
             background_tasks.add_task(whatsapp_sender.send_message, from_number, fallback_msg)
             return {"status": "accepted"}
             
         body = msg_data.get("body", "")
         media_id = msg_data.get("media_id")
+        mime_type = msg_data.get("mime_type")
         button_id = msg_data.get("button_id")
         logger.info(f"Received {message_type} message from {from_number}: {body[:50]}...")
         
         # Process the message in the background
-        background_tasks.add_task(manager.handle_message, from_number, body, media_id, button_id)
+        background_tasks.add_task(manager.handle_message, from_number, body, media_id, button_id, mime_type)
         
         return {"status": "accepted"}
     except Exception as e:

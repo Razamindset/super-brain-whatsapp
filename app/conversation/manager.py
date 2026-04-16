@@ -31,7 +31,10 @@ class ConversationManager:
             "conflicting old memory by putting its UUID in memory_ids_to_delete.\n\n"
             "REMINDERS: You have access to the user's 'Pending Reminders' in the context. "
             "If the user asks to see their reminders, set list_reminders to true. "
-            "If they ask to cancel or remove a specific reminder, find its ID from the context and put it in cancel_reminder_id."
+            "If they ask to cancel or remove a specific reminder, find its ID from the context and put it in cancel_reminder_id.\n\n"
+            "MULTIMODAL MEMORY: If the user sends an image, voice note, or audio message containing important information "
+            "(like a receipt, a prescription, a personal preference, or a factual event), you MUST: (1) Describe/Summarize "
+            "the key information from the media, and (2) Save that summary into memory_to_save so it is searchable via text later."
         )
 
     def get_user_timezone(self, phone_number_str: str) -> str:
@@ -46,12 +49,12 @@ class ConversationManager:
             pass
         return "UTC"
 
-    async def handle_message(self, from_number: str, message_text: str, media_id: str = None, button_id: str = None):
+    async def handle_message(self, from_number: str, message_text: str, media_id: str = None, button_id: str = None, mime_type: str = None):
         """
         Main orchestration logic for handling an incoming WhatsApp message.
         """
         user_id = from_number
-        image_bytes = None
+        media_bytes = None
 
         # ── REMINDER ACTION INTERCEPT ────────────────────────────────────────
         # Must run BEFORE anything else so we don't log these as conversations.
@@ -117,7 +120,7 @@ class ConversationManager:
         local_time = datetime.now(user_tz)
         
         if media_id:
-            image_bytes = await whatsapp_sender.download_media(media_id)
+            media_bytes = await whatsapp_sender.download_media(media_id)
 
         # 1. Ensure user exists and get onboarding state
         user_record = await db.ensure_user(user_id)
@@ -238,7 +241,7 @@ class ConversationManager:
             full_system_instruction += f"\n\n{reminders_context}"
             
         # 2e. Call Gemini for Structured Processing
-        action = await gemini_client.get_response(full_system_instruction, history, message_text, image_bytes)
+        action = await gemini_client.get_response(full_system_instruction, history, message_text, media_bytes, mime_type)
 
         # 2e. Send WhatsApp reply IMMEDIATELY — user gets response right away
         final_reply = action.reply
