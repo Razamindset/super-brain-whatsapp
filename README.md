@@ -117,10 +117,10 @@ This project demonstrates several advanced software engineering principles:
 ---
 
 ## 🗺️ Roadmap
-- [ ] WhatsApp Status publishing via AI.
+- [ ] Using redis queue for background tasks and scheduling.
 - [ ] PDF document parsing and knowledge extraction.
 - [ ] Integration with Google Calendar.
 - [ ] Deployment to Docker/Kubernetes.
 
 ---
-*Created with ❤️ by Ali Programming - Focused on Building Intelligent Automation.*
+*Created with ❤️ by Razamindset*
