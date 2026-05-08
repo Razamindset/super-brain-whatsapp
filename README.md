@@ -58,7 +58,7 @@ To comply with Meta's strict **30-second roundtrip threshold**, Super Brain util
 ```text
 ├── app/
 │   ├── conversation/   # Orchestration & Assistant Logic
-│   ├── database/       # Abstract DB layer (Supabase/SQLite)
+│   ├── database/       # Abstract DB layer (Supabase)
 │   ├── llm/            # Gemini API Integration
 │   ├── rag/            # Vector indexing & Semantic search
 │   ├── scheduler/      # Reminder engine & Task queuing

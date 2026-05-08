@@ -9,8 +9,8 @@ This document outlines the current features, architecture, and configuration of 
 
 2. **Retrieval-Augmented Generation (RAG) Memory**
    - Trigger term: `"remember this: <fact>"` embeds notes individually per-user context.
-   - Saves parsed text chunks as vectors embedded using `models/embedding-001` via Chroma.
-   - Any query runs a similarity seek within Chroma before injecting relevant memory fragments right back into the System prompt for an integrated answer context.
+   - Saves parsed text chunks as vectors embedded using `models/embedding-001` via Supabase Vector.
+   - Any query runs a similarity seek within Supabase before injecting relevant memory fragments right back into the System prompt for an integrated answer context.
 
 3. **Multi-Modal Graceful Degradation**
    - Automatically detects and drops complex attachment types (like images, video, audio, files).
@@ -24,12 +24,12 @@ This document outlines the current features, architecture, and configuration of 
 ## Tech Stack Overview
 - **Routing**: `FastAPI` + `uvicorn` mapping HTTP routes completely asynchronously. Native web static payloads (`index`, `privacy`) serving directly.
 - **Agent Intelligence**: `langchain` + `Google Gemini` API endpoints.
-- **Vector Database**: Locally synchronized instances of `Chroma`. 
-- **Persisted Store**: Core `aiosqlite` ORM saving unstructured chat log events + document bindings.
+- **Vector Database**: **Supabase Vector (pgvector)**. 
+- **Persisted Store**: **Supabase (PostgreSQL)** saving unstructured chat log events + document bindings.
 - **Client Networking**: Meta Cloud API (`httpx` asynchronous graph dispatcher bounds).
 
 ## Scalability Hooks Built
 - Currently utilizing `BackgroundTasks` heavily to isolate external Meta/Gemini inference timeouts, immediately returning the API `200 ACCEPTED` status. This correctly complies strictly with WhatsApp strict 30-sec roundtrip thresholds. 
-- Local SQLite + Chroma combo limits scaling out horizontally easily however perfectly positions vertical MVP delivery.
+- Supabase-backed architecture allows for horizontal scaling and serverless deployment.
 
 *Generated: April 2026*

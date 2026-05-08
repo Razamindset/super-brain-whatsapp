@@ -9,7 +9,6 @@ langchain-text-splitters
 langchain-core
 langchain-google-genai
 supabase
-aiosqlite
 pytest
 python-multipart
 phonenumbers
